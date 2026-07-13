@@ -41,8 +41,7 @@ if uploaded_file is not None:
     NAME_COL = "주차장명"
     LAT_COL = "위도"
     LNG_COL = "경도"
-    PRICE_COL = "기본요금"
-    DISTRICT_COL = "자치구"
+    PRICE_COL = "평일운영"
     ADDRESS_COL = "주소"
 
     # -----------------------------------
@@ -56,18 +55,6 @@ if uploaded_file is not None:
         .astype(float)
     )
 
-    # -----------------------------------
-    # 자치구 선택
-    # -----------------------------------
-    districts = ["전체"] + sorted(df[DISTRICT_COL].dropna().unique())
-
-    selected = st.sidebar.selectbox(
-        "자치구 선택",
-        districts
-    )
-
-    if selected != "전체":
-        df = df[df[DISTRICT_COL] == selected]
 
     # -----------------------------------
     # 요금순 정렬
