@@ -1,10 +1,4 @@
-from pathlib import Path
-import zipfile
-
-root = Path("/mnt/data/youtube_comment_analyzer_fixed")
-(root / "assets").mkdir(parents=True, exist_ok=True)
-
-app = r'''import html
+import html
 import re
 import tempfile
 from collections import Counter
@@ -611,54 +605,3 @@ with tab4:
 st.caption(
     "※ 공개된 상위 댓글만 분석하며, 삭제·차단된 댓글과 답글 본문은 포함하지 않습니다."
 )
-'''
-
-requirements = '''streamlit>=1.40,<2
-pandas>=2.2,<3
-plotly>=5.24,<7
-requests>=2.32,<3
-wordcloud>=1.9.4,<2
-kiwipiepy>=0.20,<1
-'''
-
-readme = '''# 유튜브 댓글 분석기
-
-## 배포 파일
-
-- `app.py`
-- `requirements.txt`
-- `assets/` 폴더는 선택 사항
-
-## Streamlit Cloud 배포
-
-1. 이 폴더 안의 파일을 GitHub 저장소에 업로드합니다.
-2. Streamlit Community Cloud에서 저장소를 선택합니다.
-3. Main file path를 `app.py` 또는 저장소 구조에 따라 `youtube/app.py`로 지정합니다.
-4. Deploy를 누릅니다.
-
-## API 키 준비
-
-Google Cloud Console에서 YouTube Data API v3를 활성화하고 API 키를 발급받아 앱 화면에 입력합니다.
-
-## 한글 워드클라우드
-
-한글이 네모로 표시되면 앱 사이드바에서 TTF 또는 OTF 한글 글꼴을 업로드하세요.
-또는 `assets/NanumGothic.ttf` 파일을 저장소에 추가하세요.
-'''
-
-(root / "app.py").write_text(app, encoding="utf-8")
-(root / "requirements.txt").write_text(requirements, encoding="utf-8")
-(root / "README.md").write_text(readme, encoding="utf-8")
-(root / "assets" / ".gitkeep").write_text("", encoding="utf-8")
-
-# syntax check
-compile((root / "app.py").read_text(encoding="utf-8"), str(root / "app.py"), "exec")
-
-zip_path = Path("/mnt/data/youtube_comment_analyzer_fixed.zip")
-with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-    for path in root.rglob("*"):
-        if path.is_file():
-            zf.write(path, path.relative_to(root.parent))
-
-print("문법 검사 완료")
-print(zip_path)
