@@ -1,15 +1,13 @@
 from pathlib import Path
-import textwrap, zipfile, os, json
+import zipfile
 
-base = Path("/mnt/data/youtube_comment_analyzer")
-base.mkdir(exist_ok=True)
+root = Path("/mnt/data/youtube_comment_analyzer_fixed")
+(root / "assets").mkdir(parents=True, exist_ok=True)
 
-app_py = r'''
-import html
+app = r'''import html
 import re
 import tempfile
 from collections import Counter
-from datetime import timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -31,19 +29,18 @@ st.set_page_config(
     layout="wide",
 )
 
-YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
-REQUEST_TIMEOUT = 20
+API_BASE = "https://www.googleapis.com/youtube/v3"
 
 DEFAULT_STOPWORDS = {
-    "영상", "댓글", "진짜", "정말", "너무", "그냥", "이거", "저거", "여기",
-    "오늘", "지금", "사람", "생각", "부분", "느낌", "때문", "정도", "계속",
-    "ㅋㅋ", "ㅋㅋㅋ", "ㅎㅎ", "ㅎㅎㅎ", "ㅠㅠ", "ㅜㅜ", "the", "and", "this",
-    "that", "with", "you", "your", "for", "are", "was", "but", "not",
+    "영상", "댓글", "진짜", "정말", "너무", "그냥", "이거", "저거",
+    "여기", "오늘", "지금", "사람", "생각", "부분", "느낌", "때문",
+    "정도", "계속", "ㅋㅋ", "ㅋㅋㅋ", "ㅎㅎ", "ㅎㅎㅎ", "ㅠㅠ", "ㅜㅜ",
+    "the", "and", "this", "that", "with", "you", "your", "for", "are",
+    "was", "but", "not",
 }
 
 
-def extract_video_id(value: str) -> str | None:
-    """유튜브 URL 또는 11자리 영상 ID에서 videoId를 추출한다."""
+def extract_video_id(value: str):
     value = value.strip()
 
     if re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
@@ -55,66 +52,64 @@ def extract_video_id(value: str) -> str | None:
         return None
 
     host = parsed.netloc.lower().split(":")[0]
-    path_parts = [part for part in parsed.path.split("/") if part]
+    parts = [part for part in parsed.path.split("/") if part]
+    candidate = None
 
-    if host in {"youtu.be", "www.youtu.be"} and path_parts:
-        candidate = path_parts[0]
+    if host in {"youtu.be", "www.youtu.be"} and parts:
+        candidate = parts[0]
     elif host.endswith("youtube.com"):
         if parsed.path == "/watch":
             candidate = parse_qs(parsed.query).get("v", [None])[0]
-        elif len(path_parts) >= 2 and path_parts[0] in {"shorts", "embed", "live"}:
-            candidate = path_parts[1]
-        else:
-            candidate = None
-    else:
-        candidate = None
+        elif len(parts) >= 2 and parts[0] in {"shorts", "embed", "live"}:
+            candidate = parts[1]
 
     if candidate and re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
         return candidate
+
     return None
 
 
-def youtube_get(endpoint: str, params: dict) -> dict:
-    response = requests.get(
-        f"{YOUTUBE_API_BASE}/{endpoint}",
-        params=params,
-        timeout=REQUEST_TIMEOUT,
-    )
+def youtube_get(endpoint: str, params: dict):
+    try:
+        response = requests.get(
+            f"{API_BASE}/{endpoint}",
+            params=params,
+            timeout=20,
+        )
+    except requests.Timeout as exc:
+        raise RuntimeError("YouTube API 응답 시간이 초과되었습니다.") from exc
+    except requests.RequestException as exc:
+        raise RuntimeError(f"네트워크 오류가 발생했습니다: {exc}") from exc
 
     if response.ok:
         return response.json()
 
     try:
-        error_data = response.json()
-        message = (
-            error_data.get("error", {})
-            .get("message", "YouTube API 요청에 실패했습니다.")
-        )
+        payload = response.json()
+        message = payload.get("error", {}).get("message", "API 요청 실패")
         reasons = [
             item.get("reason", "")
-            for item in error_data.get("error", {}).get("errors", [])
+            for item in payload.get("error", {}).get("errors", [])
         ]
     except ValueError:
-        message = response.text or "YouTube API 요청에 실패했습니다."
+        message = response.text or "API 요청 실패"
         reasons = []
 
     if "commentsDisabled" in reasons:
         raise RuntimeError("이 영상은 댓글이 비활성화되어 있습니다.")
     if response.status_code == 403:
         raise RuntimeError(
-            "API 키 권한·할당량 또는 YouTube Data API v3 활성화 상태를 확인하세요. "
-            f"상세 메시지: {message}"
+            "API 키 권한, 할당량 또는 YouTube Data API v3 활성화 상태를 확인하세요. "
+            f"상세: {message}"
         )
-    if response.status_code == 400:
-        raise RuntimeError(f"영상 링크 또는 요청값을 확인하세요. 상세 메시지: {message}")
     if response.status_code == 404:
-        raise RuntimeError("영상을 찾을 수 없거나 공개적으로 접근할 수 없습니다.")
+        raise RuntimeError("영상을 찾을 수 없거나 공개 영상이 아닙니다.")
 
     raise RuntimeError(f"YouTube API 오류({response.status_code}): {message}")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_video_info(api_key: str, video_id: str) -> dict:
+def fetch_video_info(api_key: str, video_id: str):
     data = youtube_get(
         "videos",
         {
@@ -129,8 +124,7 @@ def fetch_video_info(api_key: str, video_id: str) -> dict:
 
     item = data["items"][0]
     snippet = item["snippet"]
-    statistics = item.get("statistics", {})
-
+    stats = item.get("statistics", {})
     thumbnails = snippet.get("thumbnails", {})
     thumbnail = (
         thumbnails.get("high")
@@ -142,23 +136,16 @@ def fetch_video_info(api_key: str, video_id: str) -> dict:
     return {
         "title": snippet.get("title", ""),
         "channel": snippet.get("channelTitle", ""),
-        "published_at": snippet.get("publishedAt"),
         "thumbnail": thumbnail,
-        "view_count": int(statistics.get("viewCount", 0)),
-        "like_count": int(statistics.get("likeCount", 0)),
-        "comment_count": int(statistics.get("commentCount", 0)),
+        "view_count": int(stats.get("viewCount", 0)),
+        "like_count": int(stats.get("likeCount", 0)),
+        "comment_count": int(stats.get("commentCount", 0)),
     }
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_comments(
-    api_key: str,
-    video_id: str,
-    limit: int,
-    order: str,
-) -> list[dict]:
-    """YouTube Data API로 상위 댓글을 페이지네이션하여 수집한다."""
-    comments: list[dict] = []
+def fetch_comments(api_key: str, video_id: str, limit: int, order: str):
+    comments = []
     page_token = None
 
     while len(comments) < limit:
@@ -170,26 +157,24 @@ def fetch_comments(
             "textFormat": "plainText",
             "key": api_key,
         }
+
         if page_token:
             params["pageToken"] = page_token
 
         data = youtube_get("commentThreads", params)
 
         for item in data.get("items", []):
-            thread_snippet = item.get("snippet", {})
-            top_comment = thread_snippet.get("topLevelComment", {})
-            snippet = top_comment.get("snippet", {})
+            thread = item.get("snippet", {})
+            top = thread.get("topLevelComment", {})
+            snippet = top.get("snippet", {})
 
-            text = html.unescape(snippet.get("textDisplay", "")).strip()
             comments.append(
                 {
-                    "comment_id": top_comment.get("id", ""),
-                    "author": snippet.get("authorDisplayName", "알 수 없음"),
-                    "text": text,
-                    "like_count": int(snippet.get("likeCount", 0)),
-                    "reply_count": int(thread_snippet.get("totalReplyCount", 0)),
-                    "published_at": snippet.get("publishedAt"),
-                    "updated_at": snippet.get("updatedAt"),
+                    "작성자": snippet.get("authorDisplayName", "알 수 없음"),
+                    "댓글": html.unescape(snippet.get("textDisplay", "")).strip(),
+                    "좋아요": int(snippet.get("likeCount", 0)),
+                    "답글": int(thread.get("totalReplyCount", 0)),
+                    "작성시각": snippet.get("publishedAt"),
                 }
             )
 
@@ -197,32 +182,25 @@ def fetch_comments(
                 break
 
         page_token = data.get("nextPageToken")
-        if not page_token or not data.get("items"):
+        if not page_token:
             break
 
     return comments
 
 
-def prepare_dataframe(comments: list[dict]) -> pd.DataFrame:
+def prepare_dataframe(comments):
     df = pd.DataFrame(comments)
+
     if df.empty:
         return df
 
-    df["published_at"] = pd.to_datetime(
-        df["published_at"], utc=True, errors="coerce"
-    )
-    df["updated_at"] = pd.to_datetime(
-        df["updated_at"], utc=True, errors="coerce"
-    )
+    df["작성시각"] = pd.to_datetime(df["작성시각"], utc=True, errors="coerce")
+    df["작성시각_KST"] = df["작성시각"].dt.tz_convert("Asia/Seoul")
+    df["날짜"] = df["작성시각_KST"].dt.date
+    df["시간"] = df["작성시각_KST"].dt.hour
+    df["반응도"] = df["좋아요"] + df["답글"] * 2
+    df["댓글길이"] = df["댓글"].str.len()
 
-    # 한국 표준시로 변환
-    df["published_kst"] = df["published_at"].dt.tz_convert("Asia/Seoul")
-    df["date"] = df["published_kst"].dt.date
-    df["hour"] = df["published_kst"].dt.hour
-
-    # 댓글 반응도: 좋아요와 답글을 함께 반영한 단순 지표
-    df["reaction_score"] = df["like_count"] + (df["reply_count"] * 2)
-    df["text_length"] = df["text"].str.len()
     return df
 
 
@@ -233,10 +211,10 @@ def get_kiwi():
     return Kiwi()
 
 
-def extract_words(texts: list[str], stopwords: set[str]) -> Counter:
+def extract_words(texts, stopwords):
     joined = "\n".join(texts)
+    words = []
     kiwi = get_kiwi()
-    words: list[str] = []
 
     if kiwi is not None:
         allowed_tags = {"NNG", "NNP", "SL", "SN", "XR"}
@@ -245,7 +223,6 @@ def extract_words(texts: list[str], stopwords: set[str]) -> Counter:
             if token.tag in allowed_tags and len(word) >= 2:
                 words.append(word)
     else:
-        # Kiwi를 불러오지 못했을 때의 가벼운 대체 처리
         words = re.findall(r"[가-힣A-Za-z0-9]{2,}", joined.lower())
 
     cleaned = [
@@ -255,25 +232,20 @@ def extract_words(texts: list[str], stopwords: set[str]) -> Counter:
         and not re.fullmatch(r"[ㅋㅎㅠㅜ]+", word)
         and not word.startswith("http")
     ]
+
     return Counter(cleaned)
 
 
-def save_uploaded_font(uploaded_font) -> str | None:
-    if uploaded_font is None:
-        return None
+def get_font_path(uploaded_font):
+    if uploaded_font is not None:
+        suffix = Path(uploaded_font.name).suffix.lower()
+        if suffix not in {".ttf", ".otf", ".ttc"}:
+            raise RuntimeError("TTF, OTF, TTC 글꼴만 업로드할 수 있습니다.")
 
-    suffix = Path(uploaded_font.name).suffix.lower()
-    if suffix not in {".ttf", ".otf", ".ttc"}:
-        raise ValueError("TTF, OTF 또는 TTC 글꼴 파일만 사용할 수 있습니다.")
+        font_path = Path(tempfile.gettempdir()) / f"youtube_wc_font{suffix}"
+        font_path.write_bytes(uploaded_font.getvalue())
+        return str(font_path)
 
-    temp_dir = Path(tempfile.gettempdir()) / "youtube_comment_analyzer"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    font_path = temp_dir / f"wordcloud_font{suffix}"
-    font_path.write_bytes(uploaded_font.getvalue())
-    return str(font_path)
-
-
-def find_local_korean_font() -> str | None:
     candidates = [
         Path("assets/NanumGothic.ttf"),
         Path("assets/NotoSansKR-Regular.ttf"),
@@ -282,35 +254,37 @@ def find_local_korean_font() -> str | None:
         Path("C:/Windows/Fonts/malgun.ttf"),
         Path("/System/Library/Fonts/AppleSDGothicNeo.ttc"),
     ]
-    for path in candidates:
-        if path.exists():
-            return str(path)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
     return None
 
 
-def make_wordcloud(frequencies: Counter, font_path: str | None):
+def create_wordcloud(frequencies, font_path):
     if not frequencies:
         return None
 
-    wc = WordCloud(
+    cloud = WordCloud(
         width=1400,
         height=700,
         background_color="white",
         font_path=font_path,
-        collocations=False,
         max_words=150,
+        collocations=False,
         prefer_horizontal=0.9,
     )
-    return wc.generate_from_frequencies(dict(frequencies))
+    return cloud.generate_from_frequencies(dict(frequencies))
 
 
-def format_number(value: int) -> str:
+def fmt_number(value):
     return f"{int(value):,}"
 
 
 st.title("💬 유튜브 댓글 분석기")
 st.caption(
-    "YouTube Data API v3를 이용해 상위 댓글의 작성 추이, 반응도, 주요 단어를 분석합니다."
+    "YouTube Data API v3를 이용해 댓글 작성 추이, 반응도, 워드클라우드를 분석합니다."
 )
 
 with st.sidebar:
@@ -319,20 +293,22 @@ with st.sidebar:
     api_key = st.text_input(
         "YouTube Data API 키",
         type="password",
-        help="입력한 키는 브라우저 세션에서만 사용하며 코드에 저장하지 않습니다.",
+        help="입력한 API 키는 앱 코드에 저장되지 않습니다.",
     )
-    video_url = st.text_input(
+
+    video_input = st.text_input(
         "유튜브 영상 링크 또는 영상 ID",
         placeholder="https://www.youtube.com/watch?v=...",
     )
+
     comment_limit = st.number_input(
         "수집할 댓글 개수",
         min_value=10,
         max_value=5000,
         value=300,
         step=50,
-        help="API가 반환할 수 있는 공개 상위 댓글 범위 안에서 수집합니다.",
     )
+
     order_label = st.radio(
         "댓글 정렬 기준",
         ["관련도순", "최신순"],
@@ -342,58 +318,65 @@ with st.sidebar:
 
     custom_stopwords_text = st.text_area(
         "추가 불용어",
-        placeholder="단어를 쉼표로 구분하세요. 예: 채널, 구독, 좋아요",
+        placeholder="쉼표로 구분: 구독, 좋아요, 채널",
         height=90,
     )
+
     uploaded_font = st.file_uploader(
-        "워드클라우드용 한글 글꼴(선택)",
+        "한글 글꼴 업로드(선택)",
         type=["ttf", "otf", "ttc"],
-        help="저장소의 assets/NanumGothic.ttf를 사용해도 됩니다.",
     )
 
-    analyze_button = st.button(
+    analyze = st.button(
         "댓글 분석 시작",
         type="primary",
         use_container_width=True,
     )
 
-if not analyze_button:
-    st.info("왼쪽에서 API 키와 영상 링크를 입력한 뒤 **댓글 분석 시작**을 누르세요.")
+
+if not analyze:
+    st.info("왼쪽에서 API 키와 영상 링크를 입력한 뒤 분석을 시작하세요.")
     st.markdown(
         """
-        **제공 기능**
-        - 댓글 작성 날짜 추이와 0~23시 시간대 분포
-        - 좋아요·답글 수 및 반응도 상위 댓글
-        - 한국어 형태소 기반 빈출 단어와 워드클라우드
-        - 분석 결과 CSV 다운로드
+        ### 제공 기능
+        - 날짜별 댓글 작성 추이
+        - 한국 시간 기준 시간대별 댓글 분포
+        - 좋아요와 답글 기반 반응도 분석
+        - 빈출 단어 및 워드클라우드
+        - 댓글 데이터 CSV 다운로드
         """
     )
     st.stop()
+
 
 if not api_key.strip():
     st.error("YouTube Data API 키를 입력하세요.")
     st.stop()
 
-video_id = extract_video_id(video_url)
+
+video_id = extract_video_id(video_input)
+
 if not video_id:
     st.error("올바른 유튜브 영상 링크 또는 11자리 영상 ID를 입력하세요.")
     st.stop()
+
 
 progress = st.progress(0, text="영상 정보를 불러오는 중입니다.")
 
 try:
     video_info = fetch_video_info(api_key.strip(), video_id)
-    progress.progress(20, text="댓글을 수집하는 중입니다.")
 
+    progress.progress(25, text="댓글을 수집하는 중입니다.")
     comments = fetch_comments(
         api_key.strip(),
         video_id,
         int(comment_limit),
         order,
     )
-    progress.progress(70, text="댓글 데이터를 정리하는 중입니다.")
 
+    progress.progress(65, text="댓글 데이터를 분석하는 중입니다.")
     df = prepare_dataframe(comments)
+
     if df.empty:
         progress.empty()
         st.warning("수집 가능한 공개 댓글이 없습니다.")
@@ -404,101 +387,85 @@ try:
         for word in custom_stopwords_text.split(",")
         if word.strip()
     }
-    stopwords = DEFAULT_STOPWORDS | custom_stopwords
-    frequencies = extract_words(df["text"].dropna().tolist(), stopwords)
 
-    try:
-        font_path = save_uploaded_font(uploaded_font)
-    except ValueError as error:
-        st.error(str(error))
-        st.stop()
+    frequencies = extract_words(
+        df["댓글"].dropna().tolist(),
+        DEFAULT_STOPWORDS | custom_stopwords,
+    )
 
-    font_path = font_path or find_local_korean_font()
-    progress.progress(90, text="차트와 워드클라우드를 만드는 중입니다.")
+    font_path = get_font_path(uploaded_font)
+
+    progress.progress(85, text="워드클라우드를 만드는 중입니다.")
 
     wordcloud = None
     wordcloud_error = None
+
     try:
-        wordcloud = make_wordcloud(frequencies, font_path)
-    except Exception as error:
-        wordcloud_error = str(error)
+        wordcloud = create_wordcloud(frequencies, font_path)
+    except Exception as exc:
+        wordcloud_error = str(exc)
 
     progress.progress(100, text="분석이 완료되었습니다.")
     progress.empty()
 
-except requests.Timeout:
+except RuntimeError as exc:
     progress.empty()
-    st.error("YouTube API 응답 시간이 초과되었습니다. 잠시 후 다시 시도하세요.")
+    st.error(str(exc))
     st.stop()
-except requests.RequestException as error:
+except Exception as exc:
     progress.empty()
-    st.error(f"네트워크 요청 중 오류가 발생했습니다: {error}")
-    st.stop()
-except RuntimeError as error:
-    progress.empty()
-    st.error(str(error))
-    st.stop()
-except Exception as error:
-    progress.empty()
-    st.error(f"예상하지 못한 오류가 발생했습니다: {error}")
+    st.error(f"예상하지 못한 오류가 발생했습니다: {exc}")
     st.stop()
 
 
-# 영상 정보
-header_left, header_right = st.columns([1, 3])
-with header_left:
+left, right = st.columns([1, 3])
+
+with left:
     if video_info["thumbnail"]:
         st.image(video_info["thumbnail"], use_container_width=True)
-with header_right:
+
+with right:
     st.subheader(video_info["title"])
     st.write(f"채널: **{video_info['channel']}**")
-    st.caption(f"영상 ID: {video_id}")
 
     metric_cols = st.columns(4)
-    metric_cols[0].metric("영상 조회수", format_number(video_info["view_count"]))
-    metric_cols[1].metric("영상 좋아요", format_number(video_info["like_count"]))
-    metric_cols[2].metric(
-        "공개 댓글 수",
-        format_number(video_info["comment_count"]),
-    )
-    metric_cols[3].metric("실제 수집", format_number(len(df)))
+    metric_cols[0].metric("조회수", fmt_number(video_info["view_count"]))
+    metric_cols[1].metric("영상 좋아요", fmt_number(video_info["like_count"]))
+    metric_cols[2].metric("영상 댓글 수", fmt_number(video_info["comment_count"]))
+    metric_cols[3].metric("실제 수집", fmt_number(len(df)))
+
 
 st.divider()
-
-# 전체 댓글 지표
 st.subheader("분석 요약")
-summary_cols = st.columns(5)
-summary_cols[0].metric("수집 댓글", format_number(len(df)))
-summary_cols[1].metric("좋아요 합계", format_number(df["like_count"].sum()))
-summary_cols[2].metric("답글 합계", format_number(df["reply_count"].sum()))
-summary_cols[3].metric(
-    "평균 좋아요",
-    f"{df['like_count'].mean():.1f}",
-)
-summary_cols[4].metric(
-    "평균 댓글 길이",
-    f"{df['text_length'].mean():.1f}자",
-)
 
-tab_time, tab_reaction, tab_words, tab_data = st.tabs(
+summary_cols = st.columns(5)
+summary_cols[0].metric("수집 댓글", fmt_number(len(df)))
+summary_cols[1].metric("좋아요 합계", fmt_number(df["좋아요"].sum()))
+summary_cols[2].metric("답글 합계", fmt_number(df["답글"].sum()))
+summary_cols[3].metric("평균 좋아요", f"{df['좋아요'].mean():.1f}")
+summary_cols[4].metric("평균 댓글 길이", f"{df['댓글길이'].mean():.1f}자")
+
+
+tab1, tab2, tab3, tab4 = st.tabs(
     ["⏱ 작성 추이", "🔥 댓글 반응도", "☁️ 워드클라우드", "📄 원본 데이터"]
 )
 
-with tab_time:
+
+with tab1:
     st.markdown("#### 날짜별 댓글 작성 추이")
+
     daily = (
-        df.groupby("date", as_index=False)
+        df.groupby("날짜", as_index=False)
         .size()
         .rename(columns={"size": "댓글 수"})
     )
-    daily["date"] = pd.to_datetime(daily["date"])
+    daily["날짜"] = pd.to_datetime(daily["날짜"])
 
     daily_fig = px.line(
         daily,
-        x="date",
+        x="날짜",
         y="댓글 수",
         markers=True,
-        labels={"date": "작성일"},
     )
     daily_fig.update_layout(
         hovermode="x unified",
@@ -507,13 +474,13 @@ with tab_time:
     st.plotly_chart(daily_fig, use_container_width=True)
 
     st.markdown("#### 시간대별 댓글 작성 분포")
+
     hourly = (
-        df.groupby("hour")
+        df.groupby("시간")
         .size()
         .reindex(range(24), fill_value=0)
         .rename("댓글 수")
         .reset_index()
-        .rename(columns={"hour": "시간"})
     )
     hourly["시간대"] = hourly["시간"].map(lambda hour: f"{hour:02d}시")
 
@@ -523,133 +490,116 @@ with tab_time:
         y="댓글 수",
         text_auto=True,
     )
-    hourly_fig.update_layout(margin=dict(l=10, r=10, t=20, b=10))
+    hourly_fig.update_layout(
+        margin=dict(l=10, r=10, t=20, b=10),
+    )
     st.plotly_chart(hourly_fig, use_container_width=True)
+
     st.caption("시간대는 한국 표준시(KST, UTC+9)를 기준으로 표시합니다.")
 
-with tab_reaction:
+
+with tab2:
     st.caption(
-        "반응도 점수 = 좋아요 수 + (답글 수 × 2). "
-        "답글이 달린 댓글을 조금 더 강한 반응으로 간주한 자체 지표입니다."
+        "반응도 = 좋아요 수 + 답글 수 × 2로 계산합니다."
     )
 
-    reaction_fig = px.scatter(
+    scatter = px.scatter(
         df,
-        x="like_count",
-        y="reply_count",
-        size="reaction_score",
-        hover_name="author",
-        hover_data={"text": True, "reaction_score": True},
-        labels={
-            "like_count": "좋아요 수",
-            "reply_count": "답글 수",
-            "reaction_score": "반응도",
-        },
+        x="좋아요",
+        y="답글",
+        size="반응도",
+        hover_name="작성자",
+        hover_data={"댓글": True, "반응도": True},
     )
-    reaction_fig.update_layout(margin=dict(l=10, r=10, t=20, b=10))
-    st.plotly_chart(reaction_fig, use_container_width=True)
+    scatter.update_layout(
+        margin=dict(l=10, r=10, t=20, b=10),
+    )
+    st.plotly_chart(scatter, use_container_width=True)
 
     st.markdown("#### 반응도 상위 댓글")
+
+    max_top = min(30, len(df))
+    default_top = min(10, len(df))
+
     top_n = st.slider(
         "표시할 댓글 수",
-        min_value=5,
-        max_value=min(30, len(df)),
-        value=min(10, len(df)),
-        key="top_n",
+        min_value=1,
+        max_value=max_top,
+        value=default_top,
     )
-    top_comments = (
-        df.nlargest(top_n, "reaction_score")[
-            [
-                "author",
-                "text",
-                "like_count",
-                "reply_count",
-                "reaction_score",
-                "published_kst",
-            ]
+
+    top_df = (
+        df.nlargest(top_n, "반응도")[
+            ["작성자", "댓글", "좋아요", "답글", "반응도", "작성시각_KST"]
         ]
         .copy()
     )
-    top_comments.columns = [
-        "작성자",
-        "댓글",
-        "좋아요",
-        "답글",
-        "반응도",
-        "작성 시각(KST)",
-    ]
-    top_comments["작성 시각(KST)"] = top_comments["작성 시각(KST)"].dt.strftime(
+    top_df["작성시각_KST"] = top_df["작성시각_KST"].dt.strftime(
         "%Y-%m-%d %H:%M"
     )
+
     st.dataframe(
-        top_comments,
+        top_df,
         use_container_width=True,
         hide_index=True,
         column_config={
             "댓글": st.column_config.TextColumn(width="large"),
-            "좋아요": st.column_config.NumberColumn(format="%d"),
-            "답글": st.column_config.NumberColumn(format="%d"),
-            "반응도": st.column_config.NumberColumn(format="%d"),
         },
     )
 
-with tab_words:
+
+with tab3:
     word_col, rank_col = st.columns([2, 1])
 
     with word_col:
         st.markdown("#### 댓글 워드클라우드")
+
         if not frequencies:
-            st.warning("불용어를 제외한 뒤 워드클라우드에 사용할 단어가 없습니다.")
+            st.warning("워드클라우드에 사용할 단어가 없습니다.")
         elif wordcloud_error:
-            st.warning(f"워드클라우드를 만들지 못했습니다: {wordcloud_error}")
+            st.warning(f"워드클라우드 생성 실패: {wordcloud_error}")
         elif wordcloud is not None:
             st.image(wordcloud.to_array(), use_container_width=True)
+
             if font_path is None:
                 st.warning(
                     "한글 글꼴을 찾지 못했습니다. 글자가 네모로 보이면 "
-                    "사이드바에서 TTF/OTF 글꼴을 업로드하거나 "
-                    "저장소의 assets 폴더에 NanumGothic.ttf를 추가하세요."
+                    "사이드바에서 TTF 또는 OTF 글꼴을 업로드하세요."
                 )
 
     with rank_col:
         st.markdown("#### 빈출 단어")
-        top_words = pd.DataFrame(
+
+        word_df = pd.DataFrame(
             frequencies.most_common(30),
             columns=["단어", "빈도"],
         )
-        st.dataframe(top_words, use_container_width=True, hide_index=True)
 
-with tab_data:
-    display_df = df[
-        [
-            "author",
-            "text",
-            "like_count",
-            "reply_count",
-            "reaction_score",
-            "published_kst",
-        ]
+        st.dataframe(
+            word_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+with tab4:
+    export_df = df[
+        ["작성자", "댓글", "좋아요", "답글", "반응도", "작성시각_KST"]
     ].copy()
-    display_df.columns = [
-        "작성자",
-        "댓글",
-        "좋아요",
-        "답글",
-        "반응도",
-        "작성 시각(KST)",
-    ]
-    display_df["작성 시각(KST)"] = display_df["작성 시각(KST)"].dt.strftime(
+
+    export_df["작성시각_KST"] = export_df["작성시각_KST"].dt.strftime(
         "%Y-%m-%d %H:%M:%S"
     )
 
     st.dataframe(
-        display_df,
+        export_df,
         use_container_width=True,
         hide_index=True,
         height=500,
     )
 
-    csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
+    csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
+
     st.download_button(
         "CSV 파일 다운로드",
         data=csv_data,
@@ -657,13 +607,13 @@ with tab_data:
         mime="text/csv",
     )
 
+
 st.caption(
-    "※ 이 앱은 공개된 상위 댓글만 분석합니다. 삭제·차단·보류된 댓글 및 모든 답글 본문은 포함하지 않습니다."
+    "※ 공개된 상위 댓글만 분석하며, 삭제·차단된 댓글과 답글 본문은 포함하지 않습니다."
 )
 '''
 
-requirements = '''
-streamlit>=1.40,<2
+requirements = '''streamlit>=1.40,<2
 pandas>=2.2,<3
 plotly>=5.24,<7
 requests>=2.32,<3
@@ -671,22 +621,44 @@ wordcloud>=1.9.4,<2
 kiwipiepy>=0.20,<1
 '''
 
-readme = r'''
-# 유튜브 댓글 분석기
+readme = '''# 유튜브 댓글 분석기
 
-YouTube Data API v3를 이용해 유튜브 영상의 공개 상위 댓글을 수집하고 다음 항목을 분석하는 Streamlit 앱입니다.
+## 배포 파일
 
-- 날짜별 댓글 작성 추이
-- 0~23시 시간대별 댓글 분포(KST)
-- 좋아요·답글 기반 댓글 반응도
-- 한국어 형태소 기반 빈출 단어와 워드클라우드
-- CSV 다운로드
+- `app.py`
+- `requirements.txt`
+- `assets/` 폴더는 선택 사항
 
-## 파일 구조
+## Streamlit Cloud 배포
 
-```text
-youtube_comment_analyzer/
-├─ app.py
-├─ requirements.txt
-└─ assets/
-   └─ NanumGothic.ttf   # 선택 사항
+1. 이 폴더 안의 파일을 GitHub 저장소에 업로드합니다.
+2. Streamlit Community Cloud에서 저장소를 선택합니다.
+3. Main file path를 `app.py` 또는 저장소 구조에 따라 `youtube/app.py`로 지정합니다.
+4. Deploy를 누릅니다.
+
+## API 키 준비
+
+Google Cloud Console에서 YouTube Data API v3를 활성화하고 API 키를 발급받아 앱 화면에 입력합니다.
+
+## 한글 워드클라우드
+
+한글이 네모로 표시되면 앱 사이드바에서 TTF 또는 OTF 한글 글꼴을 업로드하세요.
+또는 `assets/NanumGothic.ttf` 파일을 저장소에 추가하세요.
+'''
+
+(root / "app.py").write_text(app, encoding="utf-8")
+(root / "requirements.txt").write_text(requirements, encoding="utf-8")
+(root / "README.md").write_text(readme, encoding="utf-8")
+(root / "assets" / ".gitkeep").write_text("", encoding="utf-8")
+
+# syntax check
+compile((root / "app.py").read_text(encoding="utf-8"), str(root / "app.py"), "exec")
+
+zip_path = Path("/mnt/data/youtube_comment_analyzer_fixed.zip")
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    for path in root.rglob("*"):
+        if path.is_file():
+            zf.write(path, path.relative_to(root.parent))
+
+print("문법 검사 완료")
+print(zip_path)
